@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+
+#  This script will extract each title that is longer than 30 minutes
+#  from a DVD:
+dvd_device = '/dev/sr0'
+minimum_duration_in_seconds = 1800
+#
+#  The titles will be extracted as MKV files and will be given names
+#  made up of:
+#
+#  1)  The series name entered here:
+series_name="Homicide: Life On The Street"
+#
+#  2)  The season and episode strings that are entered on the command
+#      line in the format SnnEnn,
+#
+#  3)  The episode names that we look up at thetvdb.com using the series
+#      id number given here:
+ttvdb_id = "70727"
+#
+#  The MKV files will be written in the current directory.
+#
+#  This script depends on the lsdvd and HandBrakeCLI applications.
+
+import subprocess
+import sys
+import os
+import requests
+import json
+
+#  Get an episode name from TheTVDB.com
+def getEpisodeName(ttvdb_id, season_episode_string):
+	
+	#  Register and get your own free API key at https://thetvdb.com,
+	#  this one is mine:
+	my_ttvdb_apikey = "E56BB074659FBCDD"
+
+	#  Request an authorization token using my API key
+	data = { 
+		'apikey': my_ttvdb_apikey
+	}
+	headers = {
+		'Content-Type': 'application/json',
+		'Accept': 'application/json'
+	}
+	url = 'https://api.thetvdb.com/login'
+	results = requests.post(url, headers=headers, data=json.dumps(data))
+	token = results.json()['token']
+	
+	#  Get all the episodes for the series and then look through the
+	#  array to find the one we want.  Return its name as a text string.
+	headers = {
+		'Accept': 'application/json',
+		'Authorization': 'Bearer {}'.format(token)
+	}
+	url = 'https://api.thetvdb.com/series/{}/episodes'.format(ttvdb_id)
+	results = requests.get(url, headers=headers)
+	for episode in results.json()['data']:
+#		if 'S{:02d}E{:02d}'.format(episode['dvdSeason'], episode['dvdEpisodeNumber']) == season_episode_string:
+		if 'S{:02d}E{:02d}'.format(episode['airedSeason'], episode['airedEpisodeNumber']) == season_episode_string:
+#			print(episode)
+			return episode['episodeName']
+	
+	return ''
+	
+#  Convert a "HH:MM:SS.XXX" string into a number of seconds
+def toseconds(s):
+	time_split = s.split(':')
+	return (int(time_split[0]) * 3600) + (int(time_split[1]) * 60) + float(time_split[2])
+
+#  Get list of titles from the DVD
+try:
+	cmd = 'lsdvd {} 2>/dev/null'.format(dvd_device)
+	results=subprocess.check_output(cmd, shell=True)
+except subprocess.CalledProcessError:
+	print('The "lsdvd" command returned an error.  Was the DVD drive loaded and ready for reading?')
+	print('Is your DVD drive actually "{}" as specified in this script?'.format(dvd_device))
+	exit(1)
+
+#  Check to be sure they gave us some season/episode strings on the 
+#  command line
+if len(sys.argv) < 2:
+	print("you must specify a season/episode string for each title on the DVD:")
+	print("Example: {} S01E10 S01E11 S01E12".format(__file__))
+	exit(1)
+
+#  Process each title from the DVD that's longer than 30 minutes
+episode_ctr = 1
+for line in results.decode().split('\n'):
+	if line.startswith('Title:'):
+		title = int(line.split()[1].strip(','))
+		seconds = toseconds(line.split()[3])
+		if seconds >= minimum_duration_in_seconds:
+			#  Encode it as an MKV 
+			cmd = 'HandBrakeCLI --preset "General/Fast 1080p30" -i {} -t {} --audio-copy-mask truehd,dts,ac3,aac --audio-fallback aac -E copy -o temp.mkv'.format(dvd_device, title)
+			subprocess.check_call(cmd, shell=True)
+			#  Rename it according to the season/episode strings we were
+			#  given on the command line
+			if episode_ctr < len(sys.argv):
+				episode_name = getEpisodeName(ttvdb_id,  sys.argv[episode_ctr].strip())
+				os.rename('temp.mkv', '{}.{}.{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), sys.argv[episode_ctr].strip(), episode_name.title().replace(' ', '.')))
+			else:
+				#  If we ran out of season/episode strings, use a generic name
+				print('No series information provided for title {}.'.format(title))
+				print('Saving title {} as {}.T{}.h264.480p.mkv'.format(title, series_name.replace(' ', '.'), title))
+				os.rename('temp.mkv', '{}.T{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), title))
+			episode_ctr = episode_ctr + 1

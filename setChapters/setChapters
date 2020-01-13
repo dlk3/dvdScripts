@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+
+#  This script reads chapter metadata from the titles on a DVD and
+#  injects it into pre-existing MKV files on disk.  The original MKV
+#  files are preserved, with the ".bak" extension added to their names.
+#
+#  1)  This script is run within the diretory containing the video files.
+#
+#  2)  The video files are processed in sequential order starting with
+#      the file that is specified on the command line.
+#
+#  3)  The order of the titles on the DVD must match the order of the
+#      video files on disk.
+#
+#  4)  Titles on the DVD that are shorter than 30 minutes in length are
+#      ignored.
+minimum_duration_in_seconds = 1800 
+#
+#  5)  The script depends on the lsdvd, mplayer and ffmpeg applications.
+
+dvd_device = '/dev/sr0'
+
+import os
+import sys
+import subprocess
+
+timebase = 1000000000
+
+#  Convert a "HH:MM:SS.XXX" string into a number of seconds
+def toseconds(s):
+	time_split = s.split(':')
+	return (int(time_split[0]) * 3600) + (int(time_split[1]) * 60) + float(time_split[2])
+
+#  Get chapter info from a DVD title and mux it into a MKV file
+def setChapters(disc_title, title, seconds, video_file):
+	
+	#  Use mplayer to get the chapter information out of the given title
+	#  on the DVD and write it into a text file that conforms to the 
+	#  ffmetadata format.
+	cmd = 'mplayer dvd://{}/{} -identify -frames 0 2>/dev/null'.format(title, dvd_device)
+	results=subprocess.check_output(cmd, shell=True)
+	for line in results.decode().split('\n'):
+		if line.startswith('CHAPTERS:'):
+			metadata_file = '{}-{}'.format(disc_title, title)
+			with open(metadata_file, 'w') as f:
+				f.write(';FFMETADATA1\n')
+				chapters = line.split()[1].split(',')
+				for i in range(0, len(chapters) - 2):
+					f.write('[CHAPTER]\n')
+					f.write('TIMEBASE=1/{}\n'.format(timebase))
+					f.write('START={}\n'.format(int(toseconds(chapters[i]) * timebase)))
+					if i == len(chapters) - 2:
+						f.write('END={}\n'.format(int(seconds * timebase)))
+					else:
+						f.write('END={}\n'.format(int(toseconds(chapters[i+1]) * timebase)))
+					f.write('title=Chapter {}\n'.format(i + 1))
+			break
+			
+	#  Re-mux the MKV file using ffmpeg, including the chapter metadata
+	output_file = 'new.mkv'				
+	cmd = 'ffmpeg -y -i "{}" -i "{}" -map_metadata 1 -codec copy -hide_banner "{}"'.format(video_file, metadata_file, output_file)
+	subprocess.check_call(cmd, shell=True)
+	os.rename(video_file, video_file + '.bak')
+	os.rename(output_file, video_file)
+	os.unlink(metadata_file)
+	print('Finished updating {}'.format(video_file))
+
+#  Get a list of the video files in the current directory
+videos = []
+for (dirname, dirlist, filelist) in os.walk('.'):
+	for fn in sorted(filelist):
+		videos.append(fn)
+
+#  Find the video file we were given as the first file to start with
+#  in the list of files in the current directory
+video_ctr = -1
+for i in range(0, len(videos)):
+	if len(sys.argv) > 1 and sys.argv[1] == videos[i]:
+		video_ctr = i
+		break
+
+#  Confirm that we have the information we expected
+if video_ctr == -1:
+	if len(sys.argv) <= 1:
+		print('You must tell me the name of first video file that I should inject with chapter information')
+	else:
+		print('Could not find a video file named "{}"'.format(sys.argv[1]))	
+	exit(1)
+		
+#  Get list of titles from the DVD
+try:
+	cmd = 'lsdvd {} 2>/dev/null'.format(dvd_device)
+	results=subprocess.check_output(cmd, shell=True)
+except subprocess.CalledProcessError:
+	print('The "lsdvd" command returned an error.  Was the DVD drive loaded and ready for reading?')
+        print('Is your DVD drive actually "{}" as specified in this script?'.format(dvd_device))
+	exit(1)
+
+#  Process any title on the DVD that is more than 30 minutes in length
+disc_title = ''
+for line in results.decode().split('\n'):
+	if line.startswith('Disc Title:'):
+		disc_title = line.split(':')[1].strip()
+	if line.startswith('Title:'):
+		seconds = toseconds(line.split()[3])
+		if seconds >= minimum_duration_in_seconds:
+			setChapters(disc_title, line.split()[1].strip(','), seconds, videos[video_ctr])
+			video_ctr = video_ctr + 1
