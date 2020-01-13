@@ -92,7 +92,7 @@ for line in results.decode().split('\n'):
 		seconds = toseconds(line.split()[3])
 		if seconds >= minimum_duration_in_seconds:
 			#  Encode it as an MKV 
-			cmd = 'HandBrakeCLI --preset "General/Fast 1080p30" -i {} -t {} --audio-copy-mask truehd,dts,ac3,aac --audio-fallback aac -E copy -o temp.mkv'.format(dvd_device, title)
+			cmd = 'HandBrakeCLI --preset "General/Fast 1080p30" -i {} -t {} -e nvenc_h264 --audio-copy-mask truehd,dts,ac3,aac --audio-fallback aac -E copy -o temp.mkv'.format(dvd_device, title)
 			subprocess.check_call(cmd, shell=True)
 			#  Rename it according to the season/episode strings we were
 			#  given on the command line
