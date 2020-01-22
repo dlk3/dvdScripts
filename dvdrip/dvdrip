@@ -8,29 +8,32 @@ minimum_duration_in_seconds = 1800
 #  The titles will be extracted as MKV files and will be given names
 #  made up of:
 #
-#  1)  The series name entered here:
-series_name="Homicide: Life On The Street"
+#  1)  The series name that we look up at thetvdb.com using the series
+#      id number given on the command line,
 #
 #  2)  The season and episode strings that are entered on the command
 #      line in the format SnnEnn,
 #
 #  3)  The episode names that we look up at thetvdb.com using the series
-#      id number given here:
-ttvdb_id = "70727"
+#      id number given on the command line.
 #
 #  The MKV files will be written in the current directory.
 #
 #  This script depends on the lsdvd and HandBrakeCLI applications.
 
 import subprocess
-import sys
 import os
 import requests
 import json
+import optparse
+import html2text
 
-#  Get an episode name from TheTVDB.com
-def getEpisodeName(ttvdb_id, season_episode_string):
+#  Get the series and episode names from TheTVDB.com
+def getSeriesAndEpisodeName(ttvdb_id, season_episode_string):
 	
+	if not ttvdb_id:
+		return('', '')
+		
 	#  Register and get your own free API key at https://thetvdb.com,
 	#  this one is mine:
 	my_ttvdb_apikey = "E56BB074659FBCDD"
@@ -45,29 +48,82 @@ def getEpisodeName(ttvdb_id, season_episode_string):
 	}
 	url = 'https://api.thetvdb.com/login'
 	results = requests.post(url, headers=headers, data=json.dumps(data))
+	if results.status_code != requests.codes.ok:
+		print('{} error while requesting JWT token.'.format(results.status_code))
+		print(html2text.html2text(results.text))
+		return ('', '')
 	token = results.json()['token']
 	
-	#  Get all the episodes for the series and then look through the
-	#  array to find the one we want.  Return its name as a text string.
+	#  Get the series name
 	headers = {
 		'Accept': 'application/json',
 		'Authorization': 'Bearer {}'.format(token)
 	}
-	url = 'https://api.thetvdb.com/series/{}/episodes'.format(ttvdb_id)
+	url = 'https://api.thetvdb.com/series/{}'.format(ttvdb_id)
 	results = requests.get(url, headers=headers)
-	for episode in results.json()['data']:
-#		if 'S{:02d}E{:02d}'.format(episode['dvdSeason'], episode['dvdEpisodeNumber']) == season_episode_string:
-		if 'S{:02d}E{:02d}'.format(episode['airedSeason'], episode['airedEpisodeNumber']) == season_episode_string:
-#			print(episode)
-			return episode['episodeName']
-	
-	return ''
+	if results.status_code != requests.codes.ok:
+		print('{} error while looking up series name for id={}.'.format(results.status_code, ttvdb_id))
+		print(html2text.html2text(results.text))
+		series_name = ''
+	else:
+		series_name = results.json()['data']['seriesName']
+
+	#  Get all the episodes for the series and then look through the
+	#  array to find the one we want.  Return the series name and the
+	#  episode name as a tuple.
+	#
+	#  There can be multiple pages of results from the ttvdb.com API.
+	#  Start with page one and search it for the episode we're looking
+	#  for before doing the same thing on each subsequent page.
+	page = 1
+	while True:
+		url = 'https://api.thetvdb.com/series/{}/episodes?page={}'.format(ttvdb_id, page)
+		results = requests.get(url, headers=headers)
+		if results.status_code != requests.codes.ok:
+			print('{} error while looking up episode name for {}.'.format(results.status_code, season_episode_string))
+			print(html2text.html2text(results.text))
+			return (series_name, '')
+		for episode in results.json()['data']:
+			if 'S{:02d}E{:02d}'.format(episode['airedSeason'], episode['airedEpisodeNumber']) == season_episode_string:
+				return (series_name, episode['episodeName'])
+		if isint(results.json()['links']['next']):
+			page = results.json()['links']['next']
+		else:
+			return (series_name, '')
+
+#  Test an object to see if it can be cast to an integer	
+def isint(obj):
+	try:
+		dummy = int(obj)
+	except:
+		return False
+	return True
 	
 #  Convert a "HH:MM:SS.XXX" string into a number of seconds
 def toseconds(s):
 	time_split = s.split(':')
 	return (int(time_split[0]) * 3600) + (int(time_split[1]) * 60) + float(time_split[2])
 
+usage = 'Usage: {} [-i|--inetid=nnnnnnn] [-t|--title=n] SnnEnn [SnnEnn ...]'.format(os.path.basename(__file__))
+description = 'Rips titles from DVD and names them with the season/episode numbers provided on the command line and the series and episode names it looks up at TheTVDB.com.'
+parser = optparse.OptionParser(usage=usage, description=description)
+parser.add_option('-t', '--title', action='store', dest='title', help='Only rip one DVD title, the one that\'s specified with this option.  Use the "lsdvd" command to view the list of titles on the DVD.')
+parser.add_option('-i', '--inetid', action='store', dest='inetid', help='The series id number from TheTVDB.com, used to look up series and episode names.  If this is not provided, then the disc title will be used instead of the series name and no episode names will be used as part of the file names.')
+parser.add_option('-d', '--debug', action='store_true', dest='debug', default=False, help='Don\'t actually rip the video, just test the rest of the process.')
+(options, args) = parser.parse_args()
+if len(args) < 1:
+	print("You must specify a season/episode string for each title on the DVD\n")
+	print("Example: {} -i 72521 S01E10 S01E11 S01E12".format(__file__))
+	exit(1)
+if options.title:
+	try:
+		options.title = int(options.title)
+	except:
+		print("The DVD title must be specified as an integer, \"{}\" is not valid.".format(options.title))
+		print("Use the \"lsdvd\" command to view the list of titles on the DVD.\n")
+		print(usage)
+		exit(1)
+	
 #  Get list of titles from the DVD
 try:
 	cmd = 'lsdvd {} 2>/dev/null'.format(dvd_device)
@@ -77,31 +133,39 @@ except subprocess.CalledProcessError:
 	print('Is your DVD drive actually "{}" as specified in this script?'.format(dvd_device))
 	exit(1)
 
-#  Check to be sure they gave us some season/episode strings on the 
-#  command line
-if len(sys.argv) < 2:
-	print("you must specify a season/episode string for each title on the DVD:")
-	print("Example: {} S01E10 S01E11 S01E12".format(__file__))
-	exit(1)
-
 #  Process each title from the DVD that's longer than 30 minutes
-episode_ctr = 1
+episode_ctr = 0
 for line in results.decode().split('\n'):
+	if line.startswith('Disc Title:'):
+		disc_title = line.split(':')[1].strip()
 	if line.startswith('Title:'):
 		title = int(line.split()[1].strip(','))
-		seconds = toseconds(line.split()[3])
-		if seconds >= minimum_duration_in_seconds:
-			#  Encode it as an MKV 
-			cmd = 'HandBrakeCLI --preset "General/Fast 1080p30" -i {} -t {} --audio-copy-mask truehd,dts,ac3,aac --audio-fallback aac -E copy -o temp.mkv'.format(dvd_device, title)
-			subprocess.check_call(cmd, shell=True)
-			#  Rename it according to the season/episode strings we were
-			#  given on the command line
-			if episode_ctr < len(sys.argv):
-				episode_name = getEpisodeName(ttvdb_id,  sys.argv[episode_ctr].strip())
-				os.rename('temp.mkv', '{}.{}.{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), sys.argv[episode_ctr].strip(), episode_name.title().replace(' ', '.')))
-			else:
-				#  If we ran out of season/episode strings, use a generic name
-				print('No series information provided for title {}.'.format(title))
-				print('Saving title {} as {}.T{}.h264.480p.mkv'.format(title, series_name.replace(' ', '.'), title))
-				os.rename('temp.mkv', '{}.T{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), title))
-			episode_ctr = episode_ctr + 1
+		if options.title == int(title) or not options.title:
+			seconds = toseconds(line.split()[3])
+			if seconds >= minimum_duration_in_seconds and seconds < 7200:
+				#  Encode it as an MKV 
+				cmd = 'HandBrakeCLI --preset "General/Fast 1080p30" -i {} -t {} --all-audio --audio-copy-mask truehd,dts,ac3,aac --audio-fallback aac -E copy -o temp.mkv'.format(dvd_device, title)
+				if not options.debug:
+					subprocess.check_call(cmd, shell=True)
+				#  Rename it according to the series and episode names we 
+				#  get from TheTVDB.com and the season/episode strings we
+				#  were given on the command line
+				if episode_ctr < len(args):
+					(series_name, episode_name) = getSeriesAndEpisodeName(options.inetid, args[episode_ctr].strip())
+					if series_name == '':
+						series_name = disc_title
+					if options.debug:
+						print('{}.{}.{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), args[episode_ctr].strip(), episode_name.title().replace(' ', '.')))
+					else:
+						os.rename('temp.mkv', '{}.{}.{}.h264.480p.mkv'.format(series_name.replace(' ', '.'), args[episode_ctr].strip(), episode_name.title().replace(' ', '.')))
+				else:
+					#  If we ran out of season/episode strings, use a generic name
+					print('No series information provided for title {}.'.format(title))
+					print('Saving title {} as {}.T{}.h264.480p.mkv'.format(title, disc_title, title))
+					if not options.debug:
+						os.rename('temp.mkv', '{}.T{}.h264.480p.mkv'.format(disc_title, title))
+				episode_ctr = episode_ctr + 1
+
+#  Play a noise so they know we're all done
+cmd = 'paplay /raidarray/owncloud/Android\ Device\ Data/Sounds/Notifications/Magictalk.wav'
+subprocess.call(cmd, shell=True)
